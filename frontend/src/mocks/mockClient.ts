@@ -73,6 +73,7 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
 
   const healthListeners = new Set<(health: SystemHealth) => void>();
   const auditListeners = new Set<(logs: readonly AuditRecord[]) => void>();
+  const alertListeners = new Set<(nextAlerts: readonly SecurityAlert[]) => void>();
 
   function snapshotRotation(): RotationState {
     return {
@@ -115,6 +116,40 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
     auditListeners.forEach((listener) => {
       listener(auditLogs);
     });
+  }
+
+  function notifyAlertListeners(): void {
+    alertListeners.forEach((listener) => {
+      listener(alerts);
+    });
+  }
+
+  function pushProtocolAlert(
+    identity: string,
+    service: string,
+    pathOrRule: string,
+    explanation: string,
+  ): void {
+    alerts = [
+      {
+        alertId: `alrt-${String(100 + alerts.length + 1)}`,
+        identity,
+        classification: 'PROTOCOL_ATTACK',
+        severity: 'HIGH',
+        services: [service],
+        eventIds: [auditLogs.length],
+        pathOrRule,
+        explanation,
+        confidenceScore: 1,
+        orderUncertain: false,
+        lateArrival: false,
+        eventTimestamp: new Date().toISOString(),
+        ingestTimestamp: new Date().toISOString(),
+        detectedAt: new Date().toISOString(),
+      },
+      ...alerts,
+    ];
+    notifyAlertListeners();
   }
 
   function appendAudit(
@@ -547,12 +582,13 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
         latencyMs: 5.2,
       };
 
+      const relayNode = input.relayNode ?? 'node-a';
       messages = [record, ...messages];
       appendAudit(
         input.senderId,
         status === 'DELIVERED' ? 'E2E_ENVELOPE_DELIVERED' : status,
-        'relay-node-a',
-        'node-a',
+        `relay-${relayNode}`,
+        relayNode,
         {
           transfer_id: transferId,
           recipient: input.recipientId,
@@ -560,6 +596,14 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
           ...(errorCode ? { error_code: errorCode } : {}),
         },
       );
+      if (status === 'DELIVERY_FAILED') {
+        pushProtocolAlert(
+          input.senderId,
+          `relay-${relayNode}`,
+          'CHUNK_INTEGRITY_INCOMPLETE',
+          `Transfer ${transferId} dropped missing chunk(s); partial plaintext discarded (${errorCode ?? 'DELIVERY_FAILED'}).`,
+        );
+      }
 
       return Promise.resolve(record);
     },
@@ -585,6 +629,12 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
         msg_seq: String(original.header.msgSeq),
         error_code: 'ERR_REPLAY_DETECTED',
       });
+      pushProtocolAlert(
+        original.header.senderId,
+        'relay-node-b',
+        'REPLAY_WINDOW_DUPLICATE',
+        `Duplicate envelope (${original.header.sessionId}, msg_seq=${String(original.header.msgSeq)}) rejected with ERR_REPLAY_DETECTED.`,
+      );
       return Promise.resolve(rejected);
     },
 
@@ -607,6 +657,12 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
         forged_recipient: forgedRecipientId,
         error_code: 'ERR_RECIPIENT_MISMATCH',
       });
+      pushProtocolAlert(
+        original.header.senderId,
+        'relay-node-b',
+        'AEAD_AAD_RECIPIENT_MISMATCH',
+        `Modified recipient_id (${forgedRecipientId}) failed AES-256-GCM AAD + ML-DSA-65 verification (ERR_RECIPIENT_MISMATCH).`,
+      );
       return Promise.resolve(rejected);
     },
 
@@ -632,25 +688,12 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
           ticket_peer: ticket.authenticatedPeerId,
           error_code: 'ERR_SESSION_IDENTITY_MISMATCH',
         });
-        alerts = [
-          {
-            alertId: `alrt-${String(100 + alerts.length + 1)}`,
-            identity: presenterIdentity,
-            classification: 'PROTOCOL_ATTACK',
-            severity: 'HIGH',
-            services: ['relay-node-c'],
-            eventIds: [auditLogs.length],
-            pathOrRule: 'SESSION_RESUMPTION_BINDING_MISMATCH',
-            explanation: `Identity ${presenterIdentity} attempted to resume ticket bound to ${ticket.authenticatedPeerId}.`,
-            confidenceScore: 1,
-            orderUncertain: false,
-            lateArrival: false,
-            eventTimestamp: new Date().toISOString(),
-            ingestTimestamp: new Date().toISOString(),
-            detectedAt: new Date().toISOString(),
-          },
-          ...alerts,
-        ];
+        pushProtocolAlert(
+          presenterIdentity,
+          'relay-node-c',
+          'SESSION_RESUMPTION_BINDING_MISMATCH',
+          `Identity ${presenterIdentity} attempted to resume ticket bound to ${ticket.authenticatedPeerId}.`,
+        );
         return Promise.resolve({
           accepted: false,
           errorCode: 'ERR_SESSION_IDENTITY_MISMATCH',
@@ -750,6 +793,14 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
 
     listAlerts(): Promise<readonly SecurityAlert[]> {
       return Promise.resolve(alerts);
+    },
+
+    subscribeAlerts(handlers: StreamHandlers<readonly SecurityAlert[]>): UnsubscribeFn {
+      handlers.onData(alerts);
+      alertListeners.add(handlers.onData);
+      return () => {
+        alertListeners.delete(handlers.onData);
+      };
     },
 
     getAccessGraph(): Promise<AccessGraph> {

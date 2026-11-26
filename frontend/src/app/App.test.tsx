@@ -5,7 +5,7 @@ import { createMockClient } from '../mocks/mockClient.ts';
 import { App } from './App.tsx';
 
 describe('App shell & routing', () => {
-  it('renders sidebar routes and cluster health header for controlplane and nodes', async () => {
+  it('renders sidebar routes, cluster health header, and MessagingView on root', async () => {
     const client = createMockClient();
     render(
       <MemoryRouter initialEntries={['/']}>
@@ -25,13 +25,14 @@ describe('App shell & routing', () => {
       expect(screen.getByTestId('health-node-b')).toHaveTextContent('node-b: HEALTHY');
       expect(screen.getByTestId('health-node-c')).toHaveTextContent('node-c: HEALTHY');
       expect(screen.getByTestId('active-epoch')).toHaveTextContent('epoch: 3');
+      expect(screen.getByTestId('chunk-visualiser')).toBeInTheDocument();
     });
   });
 
-  it('renders Key Governance and Audit Log views on their routes', async () => {
+  it('renders Key Governance, Audit Log, and Detection views on their routes', async () => {
     const client = createMockClient();
 
-    const { unmount } = render(
+    const gov = render(
       <MemoryRouter initialEntries={['/governance']}>
         <App client={client} />
       </MemoryRouter>,
@@ -39,15 +40,26 @@ describe('App shell & routing', () => {
     await waitFor(() => {
       expect(screen.getByTestId('governance-current-epoch')).toHaveTextContent('Epoch 3');
     });
-    unmount();
+    gov.unmount();
 
-    render(
+    const audit = render(
       <MemoryRouter initialEntries={['/audit']}>
         <App client={client} />
       </MemoryRouter>,
     );
     await waitFor(() => {
       expect(screen.getByTestId('audit-row-1')).toBeInTheDocument();
+    });
+    audit.unmount();
+
+    render(
+      <MemoryRouter initialEntries={['/detection']}>
+        <App client={client} />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('kpi-f1')).toHaveTextContent('0.96');
+      expect(screen.getByTestId('alert-drawer')).toBeInTheDocument();
     });
   });
 });
