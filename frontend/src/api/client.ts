@@ -1,0 +1,151 @@
+import { ConnectError, Code, type Transport } from '@connectrpc/connect';
+import { createConnectTransport } from '@connectrpc/connect-web';
+import type {
+  AccessGraph,
+  AuditRecord,
+  BackupBundle,
+  BackupRestoreResult,
+  CrlEntry,
+  DetectionMetrics,
+  E2EMessageRecord,
+  LogChainVerification,
+  ReEnrollResult,
+  ResumptionTicket,
+  RevocationResult,
+  RotationState,
+  SecurityAlert,
+  SendE2EMessageInput,
+  SessionResumptionResult,
+  SystemHealth,
+  DeviceRecord,
+} from './types.ts';
+import { createMockClient } from '../mocks/mockClient.ts';
+
+/**
+ * Typed client interface consumed by all operator console views.
+ * Both the live ConnectRPC adapter and the in-memory mock implement this contract.
+ */
+export interface UrGuardClient {
+  readonly mode: 'mock' | 'live';
+  readonly baseUrl: string;
+
+  getSystemHealth(): Promise<SystemHealth>;
+  getRotationState(): Promise<RotationState>;
+  triggerRotation(gracePeriodSeconds?: number): Promise<RotationState>;
+  enforceRotationCutoff(): Promise<RotationState>;
+
+  listDevices(): Promise<readonly DeviceRecord[]>;
+  listCrl(): Promise<readonly CrlEntry[]>;
+  revokeDevice(deviceId: string, reason: string): Promise<RevocationResult>;
+  reEnrollDevice(
+    revokedDeviceId: string,
+    newDeviceId: string,
+    ownerId: string,
+  ): Promise<ReEnrollResult>;
+
+  exportBackup(): Promise<BackupBundle>;
+  restoreBackup(bundle: BackupBundle): Promise<BackupRestoreResult>;
+
+  sendE2EMessage(input: SendE2EMessageInput): Promise<E2EMessageRecord>;
+  listMessages(): Promise<readonly E2EMessageRecord[]>;
+  replayMessage(transferId: string): Promise<E2EMessageRecord>;
+  tamperRecipient(transferId: string, forgedRecipientId: string): Promise<E2EMessageRecord>;
+  issueResumptionTicket(identity: string): Promise<ResumptionTicket>;
+  resumeSession(
+    ticket: ResumptionTicket,
+    presenterIdentity: string,
+  ): Promise<SessionResumptionResult>;
+
+  listAuditLogs(): Promise<readonly AuditRecord[]>;
+  appendUserAuditTest(actorId: string, userMetadataText: string): Promise<AuditRecord>;
+  verifyLogChain(tamperSeq?: number): Promise<LogChainVerification>;
+
+  listAlerts(): Promise<readonly SecurityAlert[]>;
+  getAccessGraph(): Promise<AccessGraph>;
+  getMetrics(): Promise<DetectionMetrics>;
+}
+
+export interface ClientConfig {
+  readonly useMocks: boolean;
+  readonly baseUrl: string;
+}
+
+export interface ClientEnv {
+  readonly VITE_USE_MOCKS?: string;
+  readonly VITE_API_BASE_URL?: string;
+}
+
+const DEFAULT_API_BASE_URL = 'http://localhost:8080';
+
+/** Resolve client mode and base URL from Vite environment variables. */
+export function resolveClientConfig(env: ClientEnv = import.meta.env): ClientConfig {
+  const rawUseMocks = env.VITE_USE_MOCKS ?? 'true';
+  const useMocks = rawUseMocks.toLowerCase() === 'true';
+  const configuredBaseUrl = env.VITE_API_BASE_URL?.trim();
+  const baseUrl =
+    configuredBaseUrl && configuredBaseUrl.length > 0 ? configuredBaseUrl : DEFAULT_API_BASE_URL;
+
+  return { useMocks, baseUrl };
+}
+
+function unimplementedConnectRpc(methodName: string, baseUrl: string): Promise<never> {
+  return Promise.reject(
+    new ConnectError(
+      `Live ConnectRPC method "${methodName}" requires generated Protobuf bindings from backend/proto/. Run "npm run codegen" once .proto contracts are present (target: ${baseUrl}).`,
+      Code.Unimplemented,
+    ),
+  );
+}
+
+export interface LiveUrGuardClient extends UrGuardClient {
+  readonly transport: Transport;
+}
+
+/**
+ * Live ConnectRPC client shell configured with @connectrpc/connect-web transport.
+ * Once Engineer A adds backend/proto/*.proto and codegen runs, methods delegate to
+ * createClient(Service, transport).
+ */
+export function createConnectUrGuardClient(baseUrl: string): LiveUrGuardClient {
+  const transport: Transport = createConnectTransport({
+    baseUrl,
+  });
+
+  return {
+    mode: 'live',
+    baseUrl,
+    transport,
+    getSystemHealth: () => unimplementedConnectRpc('getSystemHealth', baseUrl),
+    getRotationState: () => unimplementedConnectRpc('getRotationState', baseUrl),
+    triggerRotation: () => unimplementedConnectRpc('triggerRotation', baseUrl),
+    enforceRotationCutoff: () => unimplementedConnectRpc('enforceRotationCutoff', baseUrl),
+    listDevices: () => unimplementedConnectRpc('listDevices', baseUrl),
+    listCrl: () => unimplementedConnectRpc('listCrl', baseUrl),
+    revokeDevice: () => unimplementedConnectRpc('revokeDevice', baseUrl),
+    reEnrollDevice: () => unimplementedConnectRpc('reEnrollDevice', baseUrl),
+    exportBackup: () => unimplementedConnectRpc('exportBackup', baseUrl),
+    restoreBackup: () => unimplementedConnectRpc('restoreBackup', baseUrl),
+    sendE2EMessage: () => unimplementedConnectRpc('sendE2EMessage', baseUrl),
+    listMessages: () => unimplementedConnectRpc('listMessages', baseUrl),
+    replayMessage: () => unimplementedConnectRpc('replayMessage', baseUrl),
+    tamperRecipient: () => unimplementedConnectRpc('tamperRecipient', baseUrl),
+    issueResumptionTicket: () => unimplementedConnectRpc('issueResumptionTicket', baseUrl),
+    resumeSession: () => unimplementedConnectRpc('resumeSession', baseUrl),
+    listAuditLogs: () => unimplementedConnectRpc('listAuditLogs', baseUrl),
+    appendUserAuditTest: () => unimplementedConnectRpc('appendUserAuditTest', baseUrl),
+    verifyLogChain: () => unimplementedConnectRpc('verifyLogChain', baseUrl),
+    listAlerts: () => unimplementedConnectRpc('listAlerts', baseUrl),
+    getAccessGraph: () => unimplementedConnectRpc('getAccessGraph', baseUrl),
+    getMetrics: () => unimplementedConnectRpc('getMetrics', baseUrl),
+  };
+}
+
+/** Create either the mock client or live ConnectRPC client based on VITE_USE_MOCKS. */
+export function createUrGuardClient(config: ClientConfig = resolveClientConfig()): UrGuardClient {
+  if (config.useMocks) {
+    return createMockClient(config.baseUrl);
+  }
+  return createConnectUrGuardClient(config.baseUrl);
+}
+
+export const urGuardClient: UrGuardClient = createUrGuardClient();
