@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveClientConfig, createUrGuardClient } from '../api/client.ts';
+import type { NodeAck } from '../api/types.ts';
 import { createMockClient } from './mockClient.ts';
 
 describe('UrGuard client & mock behavior', () => {
@@ -26,16 +27,40 @@ describe('UrGuard client & mock behavior', () => {
     expect(live.mode).toBe('live');
   });
 
-  it('supports key rotation, revocation propagation, and backup tamper checks', async () => {
+  it('supports key rotation, staggered revocation acks, re-enrollment, and backup tamper checks', async () => {
     const client = createMockClient();
+
+    const preparing = await client.prepareRotation();
+    expect(preparing.phase).toBe('PREPARING');
 
     const rotated = await client.triggerRotation(30);
     expect(rotated.currentEpoch).toBe(4);
     expect(rotated.phase).toBe('COMMITTED');
+    expect(rotated.gracePeriodSeconds).toBe(30);
 
     const revocation = await client.revokeDevice('dev-alice-laptop', 'Lost device');
     expect(revocation.nodeAcks).toHaveLength(3);
     expect(revocation.revocationPropagationMs).toBeLessThan(500);
+
+    const streamedAcks: NodeAck[] = [];
+    await new Promise<void>((resolve) => {
+      client.subscribeRevocationAcks(revocation.entry.crlEpoch, {
+        onData: (ack) => streamedAcks.push(ack),
+        onComplete: () => {
+          resolve();
+        },
+      });
+    });
+    expect(streamedAcks).toHaveLength(3);
+    expect(streamedAcks.map((a) => a.nodeId)).toEqual(['node-a', 'node-b', 'node-c']);
+
+    const reEnroll = await client.reEnrollDevice(
+      'dev-alice-laptop',
+      'dev-alice-phone-02',
+      'alice@urguard.local',
+    );
+    expect(reEnroll.dekHolderDevices.some((d) => d.deviceId === 'dev-alice-phone-02')).toBe(true);
+    expect(reEnroll.dekHolderDevices.some((d) => d.deviceId === 'dev-alice-laptop')).toBe(false);
 
     const bundle = await client.exportBackup();
     const validRestore = await client.restoreBackup(bundle);
@@ -49,7 +74,7 @@ describe('UrGuard client & mock behavior', () => {
     expect(tamperedRestore.errorCode).toBe('ERR_BACKUP_CORRUPTED');
   });
 
-  it('isolates log injection payloads and verifies chain tampering', async () => {
+  it('isolates log injection payloads and detects real tampered records', async () => {
     const client = createMockClient();
     const crafted = '\n{"actor":"admin","action":"GRANT_ROOT"}';
     const record = await client.appendUserAuditTest('guest@urguard.local', crafted);
@@ -60,7 +85,8 @@ describe('UrGuard client & mock behavior', () => {
     const cleanChain = await client.verifyLogChain();
     expect(cleanChain.valid).toBe(true);
 
-    const brokenChain = await client.verifyLogChain(2);
+    await client.tamperAuditRecord(2);
+    const brokenChain = await client.verifyLogChain();
     expect(brokenChain.valid).toBe(false);
     expect(brokenChain.brokenSeq).toBe(2);
   });

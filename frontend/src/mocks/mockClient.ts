@@ -20,9 +20,12 @@ import type {
   SecurityAlert,
   SendE2EMessageInput,
   SessionResumptionResult,
+  StreamHandlers,
   SystemHealth,
+  UnsubscribeFn,
 } from '../api/types.ts';
 import {
+  GENESIS_PREV_HASH,
   SEED_ACCESS_GRAPH,
   SEED_ALERTS,
   SEED_AUDIT_LOGS,
@@ -32,24 +35,15 @@ import {
   SEED_MESSAGES,
   SEED_METRICS,
   SEED_NODES,
+  computeAuditEntryHash,
+  deterministicHex,
 } from './data.ts';
-
-function deterministicHex(seed: string, length = 64): string {
-  let acc = 0x811c9dc5;
-  let out = '';
-  for (let i = 0; i < length; i += 1) {
-    const ch = seed.charCodeAt(i % seed.length);
-    acc = Math.imul(acc ^ (ch + i), 0x01000193) >>> 0;
-    out += (acc & 0xf).toString(16);
-  }
-  return out;
-}
 
 /**
  * Stateful in-memory mock implementation of UrGuardClient.
- * Mirrors Track 4 protocol behaviors (grace period, CRL streaming acks,
- * backup tamper checks, canonical audit chaining, replay/recipient checks)
- * so frontend views can be developed and tested before backend RPCs land.
+ * Mirrors Track 4 protocol behaviors (two-phase rotation, grace-period countdown,
+ * staggered CRL streaming acks, backup tamper checks, canonical audit chaining,
+ * replay/recipient checks) for standalone frontend development and testing.
  */
 export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClient {
   let nodes: NodeInfo[] = SEED_NODES.map((n) => ({ ...n }));
@@ -75,54 +69,10 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
   const seenReplayKeys = new Set<string>(['sess-7401|alice@urguard.local|1']);
 
   let lastExportedBackup: BackupBundle | null = null;
+  const acksByCrlEpoch = new Map<number, readonly NodeAck[]>();
 
-  function appendAudit(
-    actorId: string,
-    action: string,
-    targetService: string,
-    sourceNode: string,
-    metadata: Record<string, string>,
-    changeTicket?: string,
-  ): AuditRecord {
-    const prev = auditLogs[auditLogs.length - 1];
-    const seq = (prev?.seq ?? 0) + 1;
-    const prevHash =
-      prev?.entryHash ?? '0000000000000000000000000000000000000000000000000000000000000000';
-    const sortedMeta = Object.fromEntries(
-      Object.entries(metadata).sort(([a], [b]) => a.localeCompare(b)),
-    );
-    const canonicalObj = {
-      action,
-      actor_id: actorId,
-      payload: changeTicket
-        ? { change_ticket: changeTicket, metadata: sortedMeta }
-        : { metadata: sortedMeta },
-      source_node: sourceNode,
-      target_service: targetService,
-    };
-    const canonicalBody = JSON.stringify(canonicalObj);
-    const entryHash = deterministicHex(`${String(seq)}|${prevHash}|${canonicalBody}`, 64);
-    const record: AuditRecord = {
-      seq,
-      prevHash,
-      entryHash,
-      timestamp: new Date().toISOString(),
-      actorId,
-      action,
-      targetService,
-      sourceNode,
-      payload: {
-        metadata: sortedMeta,
-        ...(changeTicket ? { changeTicket } : {}),
-      },
-      canonicalBody,
-      ...(seq % 5 === 0
-        ? { checkpointSignature: `mldsa65:cp:${String(seq)}:${entryHash.slice(0, 12)}` }
-        : {}),
-    };
-    auditLogs = [...auditLogs, record];
-    return record;
-  }
+  const healthListeners = new Set<(health: SystemHealth) => void>();
+  const auditListeners = new Set<(logs: readonly AuditRecord[]) => void>();
 
   function snapshotRotation(): RotationState {
     return {
@@ -144,21 +94,100 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
     };
   }
 
+  function snapshotHealth(): SystemHealth {
+    return {
+      mode: 'mock',
+      apiBaseUrl: baseUrl,
+      controlPlaneReady: true,
+      nodes,
+      rotation: snapshotRotation(),
+    };
+  }
+
+  function notifyHealthListeners(): void {
+    const health = snapshotHealth();
+    healthListeners.forEach((listener) => {
+      listener(health);
+    });
+  }
+
+  function notifyAuditListeners(): void {
+    auditListeners.forEach((listener) => {
+      listener(auditLogs);
+    });
+  }
+
+  function appendAudit(
+    actorId: string,
+    action: string,
+    targetService: string,
+    sourceNode: string,
+    metadata: Record<string, string>,
+    changeTicket?: string,
+  ): AuditRecord {
+    const prev = auditLogs[auditLogs.length - 1];
+    const seq = (prev?.seq ?? 0) + 1;
+    const prevHash = prev?.entryHash ?? GENESIS_PREV_HASH;
+    const sortedMeta = Object.fromEntries(
+      Object.entries(metadata).sort(([a], [b]) => a.localeCompare(b)),
+    );
+    const canonicalObj = {
+      action,
+      actor_id: actorId,
+      payload: changeTicket
+        ? { change_ticket: changeTicket, metadata: sortedMeta }
+        : { metadata: sortedMeta },
+      source_node: sourceNode,
+      target_service: targetService,
+    };
+    const canonicalBody = JSON.stringify(canonicalObj);
+    const entryHash = computeAuditEntryHash(seq, prevHash, canonicalBody);
+    const record: AuditRecord = {
+      seq,
+      prevHash,
+      entryHash,
+      timestamp: new Date().toISOString(),
+      actorId,
+      action,
+      targetService,
+      sourceNode,
+      payload: {
+        metadata: sortedMeta,
+        ...(changeTicket ? { changeTicket } : {}),
+      },
+      canonicalBody,
+      ...(seq % 5 === 0
+        ? { checkpointSignature: `mldsa65:cp:${String(seq)}:${entryHash.slice(0, 12)}` }
+        : {}),
+    };
+    auditLogs = [...auditLogs, record];
+    notifyAuditListeners();
+    return record;
+  }
+
   return {
     mode: 'mock',
     baseUrl,
 
     getSystemHealth(): Promise<SystemHealth> {
-      return Promise.resolve({
-        mode: 'mock',
-        apiBaseUrl: baseUrl,
-        controlPlaneReady: true,
-        nodes,
-        rotation: snapshotRotation(),
-      });
+      return Promise.resolve(snapshotHealth());
+    },
+
+    subscribeSystemHealth(handlers: StreamHandlers<SystemHealth>): UnsubscribeFn {
+      handlers.onData(snapshotHealth());
+      healthListeners.add(handlers.onData);
+      return () => {
+        healthListeners.delete(handlers.onData);
+      };
     },
 
     getRotationState(): Promise<RotationState> {
+      return Promise.resolve(snapshotRotation());
+    },
+
+    prepareRotation(): Promise<RotationState> {
+      rotationPhase = 'PREPARING';
+      notifyHealthListeners();
       return Promise.resolve(snapshotRotation());
     },
 
@@ -206,6 +235,7 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
           grace_period_seconds: String(gracePeriodSeconds),
         },
       );
+      notifyHealthListeners();
 
       return Promise.resolve(snapshotRotation());
     },
@@ -231,6 +261,7 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
           active_epoch: String(currentEpoch),
         },
       );
+      notifyHealthListeners();
       return Promise.resolve(snapshotRotation());
     },
 
@@ -274,6 +305,8 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
           enforced: true,
         };
       });
+      acksByCrlEpoch.set(nextCrlEpoch, nodeAcks);
+
       const maxPropagation = Math.max(...nodeAcks.map((a) => a.propagationMs));
       const tEnforcedLastNode = new Date(now.getTime() + maxPropagation).toISOString();
 
@@ -293,6 +326,7 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
         crl_epoch: String(nextCrlEpoch),
         revocation_propagation_ms: String(maxPropagation),
       });
+      notifyHealthListeners();
 
       return Promise.resolve({
         entry,
@@ -301,6 +335,35 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
         revocationPropagationMs: maxPropagation,
         nodeAcks,
       });
+    },
+
+    subscribeRevocationAcks(crlEpoch: number, handlers: StreamHandlers<NodeAck>): UnsubscribeFn {
+      const acks = acksByCrlEpoch.get(crlEpoch) ?? [];
+      if (acks.length === 0) {
+        handlers.onComplete?.();
+        return () => undefined;
+      }
+
+      const timers: ReturnType<typeof setTimeout>[] = [];
+      let cancelled = false;
+
+      acks.forEach((ack, index) => {
+        const timer = setTimeout(() => {
+          if (cancelled) return;
+          handlers.onData(ack);
+          if (index === acks.length - 1) {
+            handlers.onComplete?.();
+          }
+        }, ack.propagationMs);
+        timers.push(timer);
+      });
+
+      return () => {
+        cancelled = true;
+        timers.forEach((timer) => {
+          clearTimeout(timer);
+        });
+      };
     },
 
     reEnrollDevice(
@@ -319,21 +382,25 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
         revokedAt: null,
       };
       devices = [...devices, newDevice];
-      const retainedCollaborators = devices
-        .filter((d) => d.status === 'ACTIVE' && d.deviceId !== newDeviceId)
+      const dekHolderDevices = devices.filter(
+        (d) => d.status === 'ACTIVE' && d.deviceId !== revokedDeviceId,
+      );
+      const retainedCollaborators = dekHolderDevices
+        .filter((d) => d.deviceId !== newDeviceId)
         .map((d) => d.ownerId);
 
       appendAudit(ownerId, 'DEVICE_REENROLLED', 'key-authority', 'controlplane', {
         revoked_device_id: revokedDeviceId,
         new_device_id: newDeviceId,
-        reencapsulated_deks: '3',
+        reencapsulated_deks: String(dekHolderDevices.length),
       });
 
       return Promise.resolve({
         revokedDeviceId,
         newDevice,
-        reEncapsulatedDekCount: 3,
+        reEncapsulatedDekCount: dekHolderDevices.length,
         retainedCollaborators,
+        dekHolderDevices,
       });
     },
 
@@ -606,11 +673,33 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
       return Promise.resolve(auditLogs);
     },
 
+    subscribeAuditLogs(handlers: StreamHandlers<readonly AuditRecord[]>): UnsubscribeFn {
+      handlers.onData(auditLogs);
+      auditListeners.add(handlers.onData);
+      return () => {
+        auditListeners.delete(handlers.onData);
+      };
+    },
+
     appendUserAuditTest(actorId: string, userMetadataText: string): Promise<AuditRecord> {
       const record = appendAudit(actorId, 'USER_METADATA_SUBMITTED', 'relay-node-a', 'node-a', {
         user_input: userMetadataText,
       });
       return Promise.resolve(record);
+    },
+
+    tamperAuditRecord(seq: number): Promise<AuditRecord> {
+      const target = auditLogs.find((r) => r.seq === seq);
+      if (!target) {
+        return Promise.reject(new Error(`Audit seq ${String(seq)} not found`));
+      }
+      const tampered: AuditRecord = {
+        ...target,
+        canonicalBody: `${target.canonicalBody}/*tampered*/`,
+      };
+      auditLogs = auditLogs.map((r) => (r.seq === seq ? tampered : r));
+      notifyAuditListeners();
+      return Promise.resolve(tampered);
     },
 
     verifyLogChain(tamperSeq?: number): Promise<LogChainVerification> {
@@ -624,6 +713,27 @@ export function createMockClient(baseUrl = 'http://localhost:8080'): UrGuardClie
           verifiedAt: new Date().toISOString(),
           checkpointVerified: false,
         });
+      }
+
+      let expectedPrevHash = GENESIS_PREV_HASH;
+      for (const record of auditLogs) {
+        const expectedHash = computeAuditEntryHash(
+          record.seq,
+          expectedPrevHash,
+          record.canonicalBody,
+        );
+        if (record.prevHash !== expectedPrevHash || record.entryHash !== expectedHash) {
+          return Promise.resolve({
+            valid: false,
+            totalRecords: auditLogs.length,
+            lastVerifiedSeq: record.seq - 1,
+            brokenSeq: record.seq,
+            reason: `SHA-256 chain mismatch at seq ${String(record.seq)}: entry_hash does not match canonical_body`,
+            verifiedAt: new Date().toISOString(),
+            checkpointVerified: false,
+          });
+        }
+        expectedPrevHash = record.entryHash;
       }
 
       const last = auditLogs[auditLogs.length - 1];

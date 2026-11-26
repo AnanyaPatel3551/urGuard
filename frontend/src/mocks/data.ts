@@ -10,6 +10,35 @@ import type {
   SecurityAlert,
 } from '../api/types.ts';
 
+export const GENESIS_PREV_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+
+/** Deterministic 64-hex digest helper for mock hash chaining and fingerprints. */
+export function deterministicHex(seed: string, length = 64): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < seed.length; i += 1) {
+    const ch = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b) >>> 0;
+  }
+  let out = '';
+  for (let i = 0; i < length; i += 1) {
+    h1 = Math.imul(h1 ^ (h2 + i), 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (h1 >>> 3), 0xc2b2ae35) >>> 0;
+    out += ((h1 ^ h2) & 0xf).toString(16);
+  }
+  return out;
+}
+
+/** Computes a deterministic audit entry hash matching the FR-6 chain structure. */
+export function computeAuditEntryHash(
+  seq: number,
+  prevHash: string,
+  canonicalBody: string,
+): string {
+  return deterministicHex(`${String(seq)}|${prevHash}|${canonicalBody}`, 64);
+}
+
 export const SEED_NODES: readonly NodeInfo[] = [
   {
     nodeId: 'node-a',
@@ -142,11 +171,19 @@ export const SEED_MESSAGES: readonly E2EMessageRecord[] = [
   },
 ];
 
+const SEQ_1_BODY =
+  '{"action":"KEY_ROTATION_COMMITTED","actor_id":"admin@urguard.local","payload":{"change_ticket":"CHG-2026-1142","metadata":{"epoch":"3","grace_period_seconds":"30"}},"source_node":"controlplane","target_service":"key-authority"}';
+const SEQ_1_HASH = computeAuditEntryHash(1, GENESIS_PREV_HASH, SEQ_1_BODY);
+
+const SEQ_2_BODY =
+  '{"action":"E2E_ENVELOPE_DELIVERED","actor_id":"alice@urguard.local","payload":{"metadata":{"key_epoch":"3","recipient":"bob@urguard.local","transfer_id":"xfer-0001"}},"source_node":"node-a","target_service":"relay-node-a"}';
+const SEQ_2_HASH = computeAuditEntryHash(2, SEQ_1_HASH, SEQ_2_BODY);
+
 export const SEED_AUDIT_LOGS: readonly AuditRecord[] = [
   {
     seq: 1,
-    prevHash: '0000000000000000000000000000000000000000000000000000000000000000',
-    entryHash: 'a4f8c9012e7741b8d09142c57e8a3301f904b211a8470e2299c0018a74bc1102',
+    prevHash: GENESIS_PREV_HASH,
+    entryHash: SEQ_1_HASH,
     timestamp: '2026-11-26T09:30:01Z',
     actorId: 'admin@urguard.local',
     action: 'KEY_ROTATION_COMMITTED',
@@ -156,14 +193,13 @@ export const SEED_AUDIT_LOGS: readonly AuditRecord[] = [
       metadata: { epoch: '3', grace_period_seconds: '30' },
       changeTicket: 'CHG-2026-1142',
     },
-    canonicalBody:
-      '{"action":"KEY_ROTATION_COMMITTED","actor_id":"admin@urguard.local","payload":{"change_ticket":"CHG-2026-1142","metadata":{"epoch":"3","grace_period_seconds":"30"}},"source_node":"controlplane","target_service":"key-authority"}',
-    checkpointSignature: 'mldsa65:cp:1:91ab440ef219',
+    canonicalBody: SEQ_1_BODY,
+    checkpointSignature: `mldsa65:cp:1:${SEQ_1_HASH.slice(0, 12)}`,
   },
   {
     seq: 2,
-    prevHash: 'a4f8c9012e7741b8d09142c57e8a3301f904b211a8470e2299c0018a74bc1102',
-    entryHash: 'b820f41109e238ac147f9920d11c4820a332b190f84210c4a012334987ab4421',
+    prevHash: SEQ_1_HASH,
+    entryHash: SEQ_2_HASH,
     timestamp: '2026-11-26T10:10:00Z',
     actorId: 'alice@urguard.local',
     action: 'E2E_ENVELOPE_DELIVERED',
@@ -172,8 +208,7 @@ export const SEED_AUDIT_LOGS: readonly AuditRecord[] = [
     payload: {
       metadata: { recipient: 'bob@urguard.local', transfer_id: 'xfer-0001', key_epoch: '3' },
     },
-    canonicalBody:
-      '{"action":"E2E_ENVELOPE_DELIVERED","actor_id":"alice@urguard.local","payload":{"metadata":{"key_epoch":"3","recipient":"bob@urguard.local","transfer_id":"xfer-0001"}},"source_node":"node-a","target_service":"relay-node-a"}',
+    canonicalBody: SEQ_2_BODY,
   },
 ];
 
