@@ -175,12 +175,13 @@
 
 ## 5. Deliverables Checklist
 1. **Public GitHub Repository (`urGuard`):**
-   * Root config & build files (`.env.example`, `.gitignore`, `.dockerignore`, `Makefile`, `LICENSE`, `README.md`, `.github/workflows/ci.yml`)
-   * `backend/` (Go services, `buf` Protobuf schemas, crypto, detector, `testdata/` fixtures, tests)
-   * `frontend/` (React + TypeScript operator dashboard, `frontend/.env.example`)
-   * `deployments/` (`Dockerfile.backend`, `Dockerfile.frontend`, `nginx.conf`, `docker-compose.yml`)
-   * `scripts/` (clean-machine setup, proto codegen, chaos/crash recovery tests, benchmark/evaluation runner)
-   * `docs/` (`prd.md`, `plan.md`, `threat-model.md`, `project-brief.md` / PDF)
+   * Root config & build files (`.env.example`, `.gitignore`, `.dockerignore`, `.editorconfig`, `Makefile`, `LICENSE`, `README.md`)
+   * `.github/` (clean-machine CI workflow)
+   * `backend/` (Go services, Protobuf contracts, PQC crypto, store, protocol, detector, CLI & tests)
+   * `frontend/` (React + TypeScript + ConnectRPC operator console)
+   * `deployments/` (Dockerfiles, reverse proxy config & multi-node Compose stack)
+   * `scripts/` (clean-machine setup, codegen, chaos/crash recovery tests & benchmark/evaluation runner)
+   * `docs/` (PRD, implementation plan, 1-page threat model & 2-page project brief PDF)
    * `README.md` (clean-machine prerequisites, exact build/run/verify commands, dependency list, grace-period & clock-skew documentation)
 2. **2-Page Project Brief (PDF):**
    * Page 1: Problem, USP, Architecture diagram, Key metrics (F1, alert latency, false-alert rate, revocation time, PQC overhead)
