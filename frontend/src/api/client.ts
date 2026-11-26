@@ -70,6 +70,7 @@ export interface UrGuardClient {
   verifyLogChain(tamperSeq?: number): Promise<LogChainVerification>;
 
   listAlerts(): Promise<readonly SecurityAlert[]>;
+  subscribeAlerts(handlers: StreamHandlers<readonly SecurityAlert[]>): UnsubscribeFn;
   getAccessGraph(): Promise<AccessGraph>;
   getMetrics(): Promise<DetectionMetrics>;
 }
@@ -165,6 +166,8 @@ export function createConnectUrGuardClient(baseUrl: string): LiveUrGuardClient {
     tamperAuditRecord: () => unimplementedConnectRpc('tamperAuditRecord', baseUrl),
     verifyLogChain: () => unimplementedConnectRpc('verifyLogChain', baseUrl),
     listAlerts: () => unimplementedConnectRpc('listAlerts', baseUrl),
+    subscribeAlerts: (handlers) =>
+      unimplementedStream('subscribeAlerts', baseUrl, handlers.onError),
     getAccessGraph: () => unimplementedConnectRpc('getAccessGraph', baseUrl),
     getMetrics: () => unimplementedConnectRpc('getMetrics', baseUrl),
   };
