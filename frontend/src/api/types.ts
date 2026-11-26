@@ -189,6 +189,7 @@ export interface SendE2EMessageInput {
   readonly senderId: string;
   readonly recipientId: string;
   readonly payload: string;
+  readonly relayNode?: string;
   readonly chunkCount?: number;
   readonly keyEpoch?: number;
   readonly deliveryOrder?: readonly number[];
