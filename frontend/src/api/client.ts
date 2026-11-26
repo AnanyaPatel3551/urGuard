@@ -7,8 +7,10 @@ import type {
   BackupRestoreResult,
   CrlEntry,
   DetectionMetrics,
+  DeviceRecord,
   E2EMessageRecord,
   LogChainVerification,
+  NodeAck,
   ReEnrollResult,
   ResumptionTicket,
   RevocationResult,
@@ -16,8 +18,9 @@ import type {
   SecurityAlert,
   SendE2EMessageInput,
   SessionResumptionResult,
+  StreamHandlers,
   SystemHealth,
-  DeviceRecord,
+  UnsubscribeFn,
 } from './types.ts';
 import { createMockClient } from '../mocks/mockClient.ts';
 
@@ -30,13 +33,17 @@ export interface UrGuardClient {
   readonly baseUrl: string;
 
   getSystemHealth(): Promise<SystemHealth>;
+  subscribeSystemHealth(handlers: StreamHandlers<SystemHealth>): UnsubscribeFn;
+
   getRotationState(): Promise<RotationState>;
+  prepareRotation(): Promise<RotationState>;
   triggerRotation(gracePeriodSeconds?: number): Promise<RotationState>;
   enforceRotationCutoff(): Promise<RotationState>;
 
   listDevices(): Promise<readonly DeviceRecord[]>;
   listCrl(): Promise<readonly CrlEntry[]>;
   revokeDevice(deviceId: string, reason: string): Promise<RevocationResult>;
+  subscribeRevocationAcks(crlEpoch: number, handlers: StreamHandlers<NodeAck>): UnsubscribeFn;
   reEnrollDevice(
     revokedDeviceId: string,
     newDeviceId: string,
@@ -57,7 +64,9 @@ export interface UrGuardClient {
   ): Promise<SessionResumptionResult>;
 
   listAuditLogs(): Promise<readonly AuditRecord[]>;
+  subscribeAuditLogs(handlers: StreamHandlers<readonly AuditRecord[]>): UnsubscribeFn;
   appendUserAuditTest(actorId: string, userMetadataText: string): Promise<AuditRecord>;
+  tamperAuditRecord(seq: number): Promise<AuditRecord>;
   verifyLogChain(tamperSeq?: number): Promise<LogChainVerification>;
 
   listAlerts(): Promise<readonly SecurityAlert[]>;
@@ -97,6 +106,19 @@ function unimplementedConnectRpc(methodName: string, baseUrl: string): Promise<n
   );
 }
 
+function unimplementedStream(
+  methodName: string,
+  baseUrl: string,
+  onError?: (err: Error) => void,
+): UnsubscribeFn {
+  const err = new ConnectError(
+    `Live ConnectRPC stream "${methodName}" requires generated Protobuf bindings from backend/proto/. Run "npm run codegen" once .proto contracts are present (target: ${baseUrl}).`,
+    Code.Unimplemented,
+  );
+  onError?.(err);
+  return () => undefined;
+}
+
 export interface LiveUrGuardClient extends UrGuardClient {
   readonly transport: Transport;
 }
@@ -116,12 +138,17 @@ export function createConnectUrGuardClient(baseUrl: string): LiveUrGuardClient {
     baseUrl,
     transport,
     getSystemHealth: () => unimplementedConnectRpc('getSystemHealth', baseUrl),
+    subscribeSystemHealth: (handlers) =>
+      unimplementedStream('subscribeSystemHealth', baseUrl, handlers.onError),
     getRotationState: () => unimplementedConnectRpc('getRotationState', baseUrl),
+    prepareRotation: () => unimplementedConnectRpc('prepareRotation', baseUrl),
     triggerRotation: () => unimplementedConnectRpc('triggerRotation', baseUrl),
     enforceRotationCutoff: () => unimplementedConnectRpc('enforceRotationCutoff', baseUrl),
     listDevices: () => unimplementedConnectRpc('listDevices', baseUrl),
     listCrl: () => unimplementedConnectRpc('listCrl', baseUrl),
     revokeDevice: () => unimplementedConnectRpc('revokeDevice', baseUrl),
+    subscribeRevocationAcks: (_crlEpoch, handlers) =>
+      unimplementedStream('subscribeRevocationAcks', baseUrl, handlers.onError),
     reEnrollDevice: () => unimplementedConnectRpc('reEnrollDevice', baseUrl),
     exportBackup: () => unimplementedConnectRpc('exportBackup', baseUrl),
     restoreBackup: () => unimplementedConnectRpc('restoreBackup', baseUrl),
@@ -132,7 +159,10 @@ export function createConnectUrGuardClient(baseUrl: string): LiveUrGuardClient {
     issueResumptionTicket: () => unimplementedConnectRpc('issueResumptionTicket', baseUrl),
     resumeSession: () => unimplementedConnectRpc('resumeSession', baseUrl),
     listAuditLogs: () => unimplementedConnectRpc('listAuditLogs', baseUrl),
+    subscribeAuditLogs: (handlers) =>
+      unimplementedStream('subscribeAuditLogs', baseUrl, handlers.onError),
     appendUserAuditTest: () => unimplementedConnectRpc('appendUserAuditTest', baseUrl),
+    tamperAuditRecord: () => unimplementedConnectRpc('tamperAuditRecord', baseUrl),
     verifyLogChain: () => unimplementedConnectRpc('verifyLogChain', baseUrl),
     listAlerts: () => unimplementedConnectRpc('listAlerts', baseUrl),
     getAccessGraph: () => unimplementedConnectRpc('getAccessGraph', baseUrl),

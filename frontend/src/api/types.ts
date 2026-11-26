@@ -113,6 +113,7 @@ export interface ReEnrollResult {
   readonly newDevice: DeviceRecord;
   readonly reEncapsulatedDekCount: number;
   readonly retainedCollaborators: readonly string[];
+  readonly dekHolderDevices: readonly DeviceRecord[];
 }
 
 /** Authenticated header of an encrypted backup bundle (FR-5). */
@@ -314,3 +315,13 @@ export interface SystemHealth {
   readonly nodes: readonly NodeInfo[];
   readonly rotation: RotationState;
 }
+
+/** Callbacks for server-streaming RPC subscriptions. */
+export interface StreamHandlers<T> {
+  readonly onData: (item: T) => void;
+  readonly onError?: (err: Error) => void;
+  readonly onComplete?: () => void;
+}
+
+/** Cleanup function returned by subscription helpers. */
+export type UnsubscribeFn = () => void;
